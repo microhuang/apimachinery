@@ -21,6 +21,7 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"fmt"
+	"regexp"
 	"io"
 	"net/http"
 	"net/url"
@@ -67,7 +68,13 @@ var atomsToAttrs = map[atom.Atom]sets.String{
 	atom.Source:     sets.NewString("src"),
 	atom.Video:      sets.NewString("poster", "src"),
 
+	atom.Meta:       sets.NewString("content"),
+
 	// TODO: css URLs hidden in style elements.
+}
+
+var atomsToReg = map[atom.Atom]sets.String{
+       atom.Meta:       sets.NewString(" name=\"abc\""), //给meta标签需要转换的属性加上 来自外部的 额外的正则条件限定：<meta name="abc" ....>
 }
 
 // Transport is a transport for text/html content that replaces URLs in html
@@ -189,6 +196,13 @@ func rewriteHTML(reader io.Reader, writer io.Writer, urlRewriter func(*url.URL) 
 		case html.StartTagToken, html.SelfClosingTagToken:
 			token := tokenizer.Token()
 			if urlAttrs, ok := atomsToAttrs[token.DataAtom]; ok {
+                               var matched = true //
+                               if re, ok := atomsToReg[token.DataAtom].PopAny(); ok { //标签存在额外的正则匹配要求
+                                       rex := regexp.MustCompile(re)
+                                       matched = rex.MatchString(token.String()) //且符合正则条件时
+                               }
+                               if matched {
+	
 				for i, attr := range token.Attr {
 					if urlAttrs.Has(attr.Key) {
 						url, err := url.Parse(attr.Val)
@@ -201,6 +215,8 @@ func rewriteHTML(reader io.Reader, writer io.Writer, urlRewriter func(*url.URL) 
 						token.Attr[i].Val = urlRewriter(url)
 					}
 				}
+
+								   }
 			}
 			_, err = writer.Write([]byte(token.String()))
 		default:
