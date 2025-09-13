@@ -73,10 +73,10 @@ func TestProxyTransport(t *testing.T) {
 
 	table := map[string]Item{
 		"normal": {
-			input:        `<pre><a href="kubelet.log">kubelet.log</a><a href="/google.log">google.log</a></pre>`,
+			input:        `<meta content="/yyyyy" name="abc"></meta><pre><a href="kubelet.log">kubelet.log</a><a href="/google.log">google.log</a></pre>`,
 			sourceURL:    "http://mynode.com/logs/log.log",
 			transport:    testTransport,
-			output:       `<pre><a href="kubelet.log">kubelet.log</a><a href="http://foo.com/proxy/node/node1:10250/google.log">google.log</a></pre>`,
+			output:       `<meta content="http://foo.com/proxy/node/node1:10250/yyyyy" name="abc"><pre><a href="kubelet.log">kubelet.log</a><a href="http://foo.com/proxy/node/node1:10250/google.log">google.log</a></pre>`,
 			contentType:  "text/html",
 			forwardedURI: "/proxy/node/node1:10250/logs/log.log",
 		},
