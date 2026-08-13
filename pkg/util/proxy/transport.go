@@ -314,27 +314,49 @@ func rewriteHTML(reader io.Reader, writer io.Writer, urlRewriter func(*url.URL) 
 					}
 				}
 				// 目标属性不存在直接跳过
-				if targetAttrIdx == -1 {
+				/*if targetAttrIdx == -1 {
 					klog.V(5).Infof("skip rewrite rule for tag %s, target attr %s not found", rule.TargetTagName, rule.RewriteTargetAttr)
 					continue
-				}
+				}*/
 
 				// 第四步：执行重写逻辑
-				originVal := token.Attr[targetAttrIdx].Val
+				var originVal string
+				if targetAttrIdx != -1 {
+					originVal = token.Attr[targetAttrIdx].Val
+				}
+				//originVal := token.Attr[targetAttrIdx].Val
 				var newVal string
+				skipCurrentRule := false
 				switch rule.RewriteMode {
 				case "static":
 					newVal = rule.RewriteConfig["targetValue"]
 				case "append":
+					if targetAttrIdx == -1 {
+						skipCurrentRule = true // 属性都不存在，无法追加，安全跳过
+						break
+					}
 					newVal = originVal + rule.RewriteConfig["appendSuffix"]
 				case "replace":
+					if targetAttrIdx == -1 {
+						skipCurrentRule = true // 属性都不存在，无法替换，安全跳过
+						break
+					}
 					oldStr := rule.RewriteConfig["oldStr"]
 					newStr := rule.RewriteConfig["newStr"]
+					if oldStr == "" {
+						skipCurrentRule = true
+						break
+					}
 					newVal = strings.ReplaceAll(originVal, oldStr, newStr)
 				default:
 					newVal = originVal
 				}
-				token.Attr[targetAttrIdx].Val = newVal
+				//token.Attr[targetAttrIdx].Val = newVal
+				if targetAttrIdx != -1 {
+					token.Attr[targetAttrIdx].Val = newVal
+				} else {
+					token.Attr = append(token.Attr, html.Attribute{Key: rule.RewriteTargetAttr, Val: newVal})
+				}
 				klog.V(4).Infof("executed custom tag rewrite: tag=%s, originVal=%q, newVal=%q", rule.TargetTagName, originVal, newVal)
 			}
 			
@@ -358,6 +380,10 @@ func (t *Transport) rewriteResponse(req *http.Request, resp *http.Response) (*ht
 	newContent := &bytes.Buffer{}
 	var reader io.Reader = origBody
 	var writer io.Writer = newContent
+
+	// TODO:microhuang，定义一个闭包用于最后阶段的手动 Flush/Close，解决安全闭合问题
+	var closeWriter func() error
+	
 	encoding := resp.Header.Get("Content-Encoding")
 	switch encoding {
 	case "gzip":
@@ -369,6 +395,11 @@ func (t *Transport) rewriteResponse(req *http.Request, resp *http.Response) (*ht
 		gzw := gzip.NewWriter(writer)
 		defer gzw.Close()
 		writer = gzw
+
+		// TODO:microhuang，赋值闭包：手动触发 Close 才能确保尾部数据（Trailer）落盘
+		closeWriter = func() error {
+			return gzw.Close()
+		}
 	case "deflate":
 		var err error
 		reader = flate.NewReader(reader)
@@ -381,8 +412,19 @@ func (t *Transport) rewriteResponse(req *http.Request, resp *http.Response) (*ht
 			flw.Flush()
 		}()
 		writer = flw
+
+		// TODO:microhuang，赋值闭包：deflate 必须先 Flush 再 Close
+		closeWriter = func() error {
+			if err := flw.Flush(); err != nil {
+				return err
+			}
+			return flw.Close()
+		}
 	case "":
 		// This is fine
+
+		// TODO:microhuang，明文传输不需要额外的压缩清理逻辑
+		closeWriter = func() error { return nil }
 	default:
 		// Some encoding we don't understand-- don't try to parse this
 		klog.Errorf("Proxy encountered encoding %v for text/html; can't understand this so not fixing links.", encoding)
@@ -411,6 +453,12 @@ func (t *Transport) rewriteResponse(req *http.Request, resp *http.Response) (*ht
 		klog.FromContext(req.Context()).Error(err, "Failed to rewrite URLs and custom tags")
 		// klog.Errorf("Failed to rewrite URLs: %v", err)
 		return resp, err
+	}
+	// TODO:microhuang, 【核心修复点】在计算长度前，如果存在压缩器，必须强制其闭合排空缓冲区
+	if closeWriter != nil {
+		if err := closeWriter(); err != nil {
+			return nil, fmt.Errorf("error closing compression writer: %v", err)
+		}
 	}
 
 	resp.Body = io.NopCloser(newContent)
