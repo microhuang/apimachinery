@@ -68,13 +68,64 @@ var atomsToAttrs = map[atom.Atom]sets.String{
 	atom.Source:     sets.NewString("src"),
 	atom.Video:      sets.NewString("poster", "src"),
 
-	atom.Meta:       sets.NewString("content"),
+	// TODO: microhuang
+	//atom.Meta:       sets.NewString("content"),
 
 	// TODO: css URLs hidden in style elements.
 }
 
-var atomsToReg = map[atom.Atom]sets.String{
-       atom.Meta:       sets.NewString(" name=\"abc\""), //给meta标签需要转换的属性加上 来自外部的 额外的正则条件限定：<meta name="abc" ....>
+/*
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-app-service
+  annotations:
+    # 核心配置项：自定义HTML标签重写规则列表
+    proxy.config.k8s.io/custom-tag-rewrite-rules: |
+      - targetTagName: "meta"
+        # 【场景1】需要额外匹配：仅当 meta name="abc" 时生效
+        extraMatchAttrs:
+          name: "abc"
+        rewriteTargetAttr: "content"
+        rewriteMode: "append"
+        rewriteConfig:
+          appendSuffix: "-k8s-proxy-v1"
+          
+      - targetTagName: "img"
+        # 【场景2】无需额外匹配：所有 img 标签均生效
+        extraMatchAttrs: {}
+        rewriteTargetAttr: "src"
+        rewriteMode: "replace"
+        rewriteConfig:
+          oldStr: "/images/"
+          newStr: "https://cdn.example.com/images/"
+          
+      - targetTagName: "script"
+        # 【场景3】静态替换：将所有 script src 替换为指定CDN地址
+        extraMatchAttrs: {}
+        rewriteTargetAttr: "src"
+        rewriteMode: "static"
+        rewriteConfig:
+          targetValue: "https://cdn.example.com/main.js"
+*/
+// TODO: microhuang
+//var atomsToReg = map[atom.Atom]sets.String{
+//       atom.Meta:       sets.NewString(" name=\"abc\""), //给meta标签需要转换的属性加上 来自外部的 额外的正则条件限定：<meta name="abc" ....>
+//}
+
+// TODO: microhuang,【新增通用重写规则结构体1】 完全适配Service YAML配置，支持任意HTML标签自定义重写
+type UniversalTagRewriteRule struct {
+	// 目标HTML标签名，如meta、img、a、script等
+	TargetTagName string `json:"targetTagName" yaml:"targetTagName"`
+	// 【可选】额外匹配属性：仅当标签同时命中这些属性键值对时，才执行重写逻辑
+	// 留空时表示：只要命中标签名就直接执行重写，无需额外校验
+	ExtraMatchAttrs map[string]string `json:"extraMatchAttrs" yaml:"extraMatchAttrs"`
+	// 需要重写的目标属性名，如meta的content、img的src、a的href
+	RewriteTargetAttr string `json:"rewriteTargetAttr" yaml:"rewriteTargetAttr"`
+	// 重写模式：static(静态替换)、append(追加内容)、replace(替换指定子串)
+	RewriteMode string `json:"rewriteMode" yaml:"rewriteMode"`
+	// 重写参数配置，不同模式传入对应所需值
+	RewriteConfig map[string]string `json:"rewriteConfig" yaml:"rewriteConfig"`
 }
 
 // Transport is a transport for text/html content that replaces URLs in html
@@ -85,6 +136,9 @@ type Transport struct {
 	PathPrepend string
 
 	http.RoundTripper
+
+	// TODO: microhuang,【新增配置注入字段2】 当前代理实例绑定的规则加载器，从对应Service YAML注解中读取所有自定义重写规则
+	ServiceTagRulesProvider func() ([]UniversalTagRewriteRule, error)
 }
 
 // RoundTrip implements the http.RoundTripper interface
@@ -183,7 +237,10 @@ func (t *Transport) rewriteURL(url *url.URL, sourceURL *url.URL, sourceRequestHo
 // rewriteHTML scans the HTML for tags with url-valued attributes, and updates
 // those values with the urlRewriter function. The updated HTML is output to the
 // writer.
-func rewriteHTML(reader io.Reader, writer io.Writer, urlRewriter func(*url.URL) string) error {
+
+// TODO: microhuang【扩展升级】新增通用重写规则入参，执行自定义标签重写逻辑
+func rewriteHTML(reader io.Reader, writer io.Writer, urlRewriter func(*url.URL) string, customRules []UniversalTagRewriteRule) error {
+// func rewriteHTML(reader io.Reader, writer io.Writer, urlRewriter func(*url.URL) string) error {
 	// Note: This assumes the content is UTF-8.
 	tokenizer := html.NewTokenizer(reader)
 
@@ -196,12 +253,12 @@ func rewriteHTML(reader io.Reader, writer io.Writer, urlRewriter func(*url.URL) 
 		case html.StartTagToken, html.SelfClosingTagToken:
 			token := tokenizer.Token()
 			if urlAttrs, ok := atomsToAttrs[token.DataAtom]; ok {
-                               var matched = true //
-                               if re, ok := atomsToReg[token.DataAtom].PopAny(); ok { //标签存在额外的正则匹配要求
-                                       rex := regexp.MustCompile(re)
-                                       matched = rex.MatchString(token.String()) //且符合正则条件时
-                               }
-                               if matched {
+                               //var matched = true //
+                               //if re, ok := atomsToReg[token.DataAtom].PopAny(); ok { //标签存在额外的正则匹配要求
+                               //        rex := regexp.MustCompile(re)
+                               //        matched = rex.MatchString(token.String()) //且符合正则条件时
+                               //}
+                               //if matched {
 	
 				for i, attr := range token.Attr {
 					if urlAttrs.Has(attr.Key) {
@@ -216,8 +273,71 @@ func rewriteHTML(reader io.Reader, writer io.Writer, urlRewriter func(*url.URL) 
 					}
 				}
 
-								   }
+								//}
 			}
+
+			// TODO: microhuang,【新增通用重写引擎3】 匹配所有Service配置的自定义标签重写规则
+			for _, rule := range customRules {
+				// 第一步：快速匹配目标标签名
+				if token.Data != rule.TargetTagName {
+					continue
+				}
+
+				// 第二步：校验额外匹配属性，规则未配置ExtraMatchAttrs则直接跳过校验
+				matchPassed := true
+				for matchKey, matchVal := range rule.ExtraMatchAttrs {
+					attrExist := false
+					attrActualVal := ""
+					for _, attr := range token.Attr {
+						if attr.Key == matchKey {
+							attrExist = true
+							attrActualVal = attr.Val
+							break
+						}
+					}
+					// 属性不存在或值不匹配，直接中断当前规则匹配
+					if !attrExist || attrActualVal != matchVal {
+						matchPassed = false
+						break
+					}
+				}
+				if !matchPassed {
+					continue
+				}
+
+				// 第三步：定位需要重写的目标属性索引
+				targetAttrIdx := -1
+				for i, attr := range token.Attr {
+					if attr.Key == rule.RewriteTargetAttr {
+						targetAttrIdx = i
+						break
+					}
+				}
+				// 目标属性不存在直接跳过
+				if targetAttrIdx == -1 {
+					klog.V(5).Infof("skip rewrite rule for tag %s, target attr %s not found", rule.TargetTagName, rule.RewriteTargetAttr)
+					continue
+				}
+
+				// 第四步：执行重写逻辑
+				originVal := token.Attr[targetAttrIdx].Val
+				var newVal string
+				switch rule.RewriteMode {
+				case "static":
+					newVal = rule.RewriteConfig["targetValue"]
+				case "append":
+					newVal = originVal + rule.RewriteConfig["appendSuffix"]
+				case "replace":
+					oldStr := rule.RewriteConfig["oldStr"]
+					newStr := rule.RewriteConfig["newStr"]
+					newVal = strings.ReplaceAll(originVal, oldStr, newStr)
+				default:
+					newVal = originVal
+				}
+				token.Attr[targetAttrIdx].Val = newVal
+				klog.V(4).Infof("executed custom tag rewrite: tag=%s, originVal=%q, newVal=%q", rule.TargetTagName, originVal, newVal)
+			}
+			
 			_, err = writer.Write([]byte(token.String()))
 		default:
 			_, err = writer.Write(tokenizer.Raw())
@@ -269,12 +389,27 @@ func (t *Transport) rewriteResponse(req *http.Request, resp *http.Response) (*ht
 		return resp, nil
 	}
 
+	// TODO:microhuang, 【新增规则拉取逻辑4】 拉取当前请求对应Service的所有自定义重写规则，异常场景自动降级返回空规则不中断代理
+	var customRewriteRules []UniversalTagRewriteRule
+	if t.ServiceTagRulesProvider != nil {
+		var err error
+		customRewriteRules, err = t.ServiceTagRulesProvider()
+		if err != nil {
+			klog.FromContext(req.Context()).V(4).Infof("failed to load custom rewrite rules from service yaml, skip all custom tag rewrite: %v", err)
+			customRewriteRules = []UniversalTagRewriteRule{}
+		}
+	}
+
 	urlRewriter := func(targetUrl *url.URL) string {
 		return t.rewriteURL(targetUrl, req.URL, req.Host)
 	}
-	err := rewriteHTML(reader, writer, urlRewriter)
+
+	// TODO:microhuang, 传入自定义规则，执行完整HTML处理逻辑
+	err := rewriteHTML(reader, writer, urlRewriter, customRewriteRules)
+	// err := rewriteHTML(reader, writer, urlRewriter)
 	if err != nil {
-		klog.Errorf("Failed to rewrite URLs: %v", err)
+		klog.FromContext(req.Context()).Error(err, "Failed to rewrite URLs and custom tags")
+		// klog.Errorf("Failed to rewrite URLs: %v", err)
 		return resp, err
 	}
 
