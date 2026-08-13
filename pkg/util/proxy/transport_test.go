@@ -234,6 +234,92 @@ func TestProxyTransport(t *testing.T) {
 			forwardedURI: "/proxy/node/node1:10250/redirect",
 			reqHost:      "10.0.0.1:8001",
 		},
+		// 以下为 microhuang 追加的自定义 HTML 标签重写测试用例
+		// =========================================================================
+		"custom_static_rewrite": {
+			input:        `<html><body><script src="http://old.com"></script></body></html>`,
+			sourceURL:    "http://mynode.com/logs/log.log",
+			transport:    testTransport,
+			contentType:  "text/html",
+			forwardedURI: "/proxy/node/node1:10250/logs/log.log",
+			rules: []UniversalTagRewriteRule{
+				{
+					TargetTagName:     "script",
+					RewriteTargetAttr: "src",
+					RewriteMode:       "static",
+					RewriteConfig:     map[string]string{"targetValue": "https://example.com"},
+				},
+			},
+			output: `<html><body><script src="https://example.com"></script></body></html>`, // 注意：如果官方 Item 里的输出字段叫 output，请把这一行改为 output: `...`
+		},
+		"custom_static_inject": {
+			input:        `<html><body><img class="avatar"></body></html>`,
+			sourceURL:    "http://mynode.com/logs/log.log",
+			transport:    testTransport,
+			contentType:  "text/html",
+			forwardedURI: "/proxy/node/node1:10250/logs/log.log",
+			rules: []UniversalTagRewriteRule{
+				{
+					TargetTagName:     "img",
+					RewriteTargetAttr: "src",
+					RewriteMode:       "static",
+					RewriteConfig:     map[string]string{"targetValue": "https://cdn.com"},
+				},
+			},
+			output: `<html><body><img class="avatar" src="https://cdn.com"></body></html>`,
+		},
+		"custom_append_rewrite": {
+			input:        `<html><head><meta name="version" content="v1.0"><meta name="fix" type="dynamic" content="abc"></head></html>`,
+			sourceURL:    "http://mynode.com/logs/log.log",
+			transport:    testTransport,
+			contentType:  "text/html",
+			forwardedURI: "/proxy/node/node1:10250/logs/log.log",
+			rules: []UniversalTagRewriteRule{
+				{
+					TargetTagName:     "meta",
+					ExtraMatchAttrs: map[string]string{ // 属性过滤、多属性过滤支持
+						"name": "fix",
+						"type": "dynamic",
+					},
+					RewriteTargetAttr: "content",
+					RewriteMode:       "append",
+					RewriteConfig:     map[string]string{"appendSuffix": "-k8s-proxy-v1"},
+				},
+			},
+			output: `<html><head><meta name="version" content="v1.0"><meta name="fix" type="dynamic" content="abc-k8s-proxy-v1"></head></html>`,
+		},
+		"custom_replace_rewrite": {
+			input:        `<html><body><img src="/images/logo.png"></body></html>`,
+			sourceURL:    "http://mynode.com/logs/log.log",
+			transport:    testTransport,
+			contentType:  "text/html",
+			forwardedURI: "/proxy/node/node1:10250/logs/log.log",
+			rules: []UniversalTagRewriteRule{
+				{
+					TargetTagName:     "img",
+					RewriteTargetAttr: "src",
+					RewriteMode:       "replace",
+					RewriteConfig:     map[string]string{"oldStr": "/images/", "newStr": "https://cdn.com"},
+				},
+			},
+			output: `<html><body><img src="https://cdn.comlogo.png"></body></html>`,
+		},
+		"custom_replace_empty_defense": {
+			input:        `<html><body><img src="/images/logo.png"></body></html>`,
+			sourceURL:    "http://mynode.com/logs/log.log",
+			transport:    testTransport,
+			contentType:  "text/html",
+			forwardedURI: "/proxy/node/node1:10250/logs/log.log",
+			rules: []UniversalTagRewriteRule{
+				{
+					TargetTagName:     "img",
+					RewriteTargetAttr: "src",
+					RewriteMode:       "replace",
+					RewriteConfig:     map[string]string{"oldStr": "", "newStr": "unsafe-hack"},
+				},
+			},
+			expectedOutput: `<html><body><img src="/images/logo.png"></body></html>`, // 触发防御拦截，原样输出
+		},
 	}
 
 	testItem := func(name string, item *Item) {
@@ -311,6 +397,16 @@ func TestProxyTransport(t *testing.T) {
 	}
 
 	for name, item := range table {
+		
+		// TODO:microhuang: 核心传参通道。在进入测试前，判断当前用例的 transport 是否存在
+		if item.transport != nil {
+			currentRules := item.rules // 局部变量快照，防止闭包在多轮循环中被覆盖
+			// 将当前单测项里配置的 rules 包装成 Provider 传递并注入到 Transport 实例中
+			item.transport.ServiceTagRulesProvider = func() ([]UniversalTagRewriteRule, error) {
+				return currentRules, nil
+			}
+		}
+		
 		testItem(name, &item)
 	}
 }
