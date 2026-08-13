@@ -351,6 +351,19 @@ func rewriteHTML(reader io.Reader, writer io.Writer, urlRewriter func(*url.URL) 
 				default:
 					newVal = originVal
 				}
+				if skipCurrentRule {
+					continue
+				}
+				// if rule.NeedProxyRewrite && newVal != "" // 默认加上proxy前缀
+				{
+					parsedURL, err := url.Parse(newVal)
+					if err == nil {
+						// 调用官方传入的 urlRewriter，强制给 newVal 加上标准的 proxy 前缀地址
+						newVal = urlRewriter(parsedURL)
+					} else {
+						klog.V(4).Infof("custom tag rewrite url parse failed: %v", err)
+					}
+				}
 				//token.Attr[targetAttrIdx].Val = newVal
 				if targetAttrIdx != -1 {
 					token.Attr[targetAttrIdx].Val = newVal
